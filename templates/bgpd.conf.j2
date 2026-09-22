@@ -34,9 +34,19 @@ rtr 127.0.0.1 {
 # Ondersteunt de validator nog geen ASPA, dan blijft avs simpelweg 'unknown' (geen impact).
 
 # --- Statische roa-set voor eigen prefixes (fallback / zolang er geen validator draait) ---
+# maxlen is bewust 32 (v4) / 128 (v6), niet de prefixlengte zelf: RTBH werkt
+# door een /32-/128-announcement uit eigen ruimte te taggen met de blackhole-
+# community, en dat moet ook zónder vooraf per doelwit een eigen ROA aan te
+# maken RPKI-valide zijn - anders blokkeert 'deny to any ovs invalid' de
+# eigen router al bij het versturen. Bewuste trade-off: elke prefixlengte
+# tot /32 met dit origin-AS geldt nu als valide, dus dit verzwakt RPKI's
+# bescherming tegen hijacks van een deel van eigen ruimte. Moet consistent
+# blijven met de daadwerkelijk bij de RIR geregistreerde ROA's - deze
+# fallback is alleen actief zolang Routinator (de rtr-sessie hierboven) niet
+# bereikbaar is.
 roa-set {
 {%- for p in own_prefixes %}
-	{{ p }} maxlen {{ p.split('/')[1] }} source-as {{ local_asn or '<eigen-asn>' }}
+	{{ p }} maxlen {{ 128 if ':' in p else 32 }} source-as {{ local_asn or '<eigen-asn>' }}
 {%- endfor %}
 }
 
