@@ -22,11 +22,17 @@ neighbor {{ session.remote_ip }} {
 	down
 {%- endif %}
 {%- if session.password %}
-	password "{{ session.password }}"
+	tcp md5sig password "{{ session.password }}"
 {%- endif %}
 {%- if session.ttl %}
-	ttl-security yes
-	tcp md5sig
+# Multihop (peer.ttl = hopcount, niet GTSM/ttl-security - dat is een apart,
+# strenger mechanisme dat medewerking van de peer vereist). peer.source geeft
+# desgewenst het lokale bindadres (default is anders het OS-routetabel-adres
+# richting de peer, wat niet per se het bedoelde adres is bij multihop).
+	multihop {{ session.ttl }}
+{%- if session.source_ip %}
+	local-address {{ session.source_ip }}
+{%- endif %}
 {%- endif %}
 {%- if session.bfd_profile %}
 	# BFD-profiel '{{ session.bfd_profile.name }}': min-tx {{ session.bfd_profile.minimum_interval }}ms, min-rx {{ session.bfd_profile.minimum_rx_interval }}ms, multiplier {{ session.bfd_profile.multiplier }}

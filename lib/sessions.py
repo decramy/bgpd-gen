@@ -89,6 +89,7 @@ def build_sessions(token: str, scope_id: int) -> list[dict]:
             "maintenance": maintenance,
             "password": peer.get("password") or "",
             "ttl": peer.get("ttl"),
+            "source_ip": peer["source"]["address"].split("/")[0] if peer.get("source") else None,
             "bfd_profile": {
                 "name": bfd["name"], "minimum_interval": bfd["min_tx_int"],
                 "minimum_rx_interval": bfd["min_rx_int"], "multiplier": bfd["multiplier"],
