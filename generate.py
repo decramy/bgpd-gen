@@ -28,17 +28,7 @@ import urllib.parse
 import jinja2
 
 from lib.cli import run_main, setup_logging
-from lib.config import (
-    AS_SETS_FILE,
-    CANARY_V4,
-    CANARY_V6,
-    NETBOX_BASE,
-    OUTPUT_DIR,
-    PEERS_DIR,
-    RELATIONSHIP_IDS,
-    RTBH_SURVEYS_DIR,
-    TEMPLATES_DIR,
-)
+from lib.config import AS_SETS_FILE, NETBOX_BASE, OUTPUT_DIR, PEERS_DIR, RELATIONSHIP_IDS, RTBH_SURVEYS_DIR, TEMPLATES_DIR
 from lib.errors import BgpdGenError
 from lib.netbox import load_token, netbox_get
 from lib.router import device_id_from_router, get_router, get_scope
@@ -374,8 +364,6 @@ def cmd_render_main_config(args: argparse.Namespace) -> None:
             transit_networks=context["transit_networks"],
             rtbh_survey_by_fabric=context["rtbh_survey_by_fabric"],
             own_prefixes=context["own_prefixes"],
-            canary_v4=CANARY_V4,
-            canary_v6=CANARY_V6,
         )
         atomic_write(OUTPUT_DIR / "peers" / f"{slug}.conf", content.strip() + "\n")
         args.log.info("geschreven: peers/%s.conf", slug)

@@ -76,18 +76,20 @@ deny quick from {{ session.remote_ip }} transit-as { {{ transit_networks | join(
 {%- if session.relationship == 'Route Server' and session.peering_network %}
 {%- set rs_is_v6 = ':' in session.remote_ip %}
 {%- set rs_family = 6 if rs_is_v6 else 4 %}
-{%- set canary = canary_v6 if rs_is_v6 else canary_v4 %}
-{%- if canary %}
-# RTBH-survey-canary altijd ongefilterd naar deze RS versturen, vóór en los
-# van de survey-gated selectie hieronder ('quick', dus deze regel wint altijd
-# van de latere or-longer-regel voor dezelfde /32-/128). Zonder deze
-# uitzondering zou de canary zelf al de <rs-asn>:0:0-communities van de
-# vorige survey-run meekrijgen en dus alleen nog relayed worden naar reeds
-# als OK bekende ASN's - een cirkelredenering waarbij nieuwe of eerder
-# afgekeurde deelnemers nooit meer OK kunnen worden (rtbh_survey.py kan de
-# testroute dan simpelweg nooit meer bij ze krijgen).
-allow quick to {{ session.remote_ip }} prefix {{ canary }}/{{ '128' if rs_is_v6 else '32' }}
-{%- endif %}
+{%- set inet_kw = 'inet6' if rs_is_v6 else 'inet' %}
+{%- set plen = '128' if rs_is_v6 else '32' %}
+# Elke eigen route met een blackhole-community altijd ongefilterd naar deze
+# RS versturen, vóór en los van de survey-gated selectie hieronder ('quick',
+# dus deze regels winnen altijd van de latere or-longer-regel). Dit geldt
+# zowel voor de RTBH-survey-canary (rtbh_survey.py) als voor een echte RTBH
+# tijdens een aanval: zonder deze uitzondering zou zo'n route de <rs-asn>:0:0-
+# communities van de vorige survey-run meekrijgen en dus alleen nog relayed
+# worden naar reeds als OK bekende ASN's - voor de survey een cirkelredenering
+# (nieuwe/eerder afgekeurde deelnemers kunnen dan nooit meer OK worden), voor
+# een echte aanval een onnodige beperking (juist dan wil je zo breed mogelijk
+# propageren, ook naar niet-bevestigde deelnemers).
+allow quick to {{ session.remote_ip }} {{ inet_kw }} prefixlen = {{ plen }} community BLACKHOLE
+allow quick to {{ session.remote_ip }} {{ inet_kw }} prefixlen = {{ plen }} community local-as:666
 {%- set survey = rtbh_survey_by_fabric.get((session.peering_network.fabric, rs_family)) %}
 {%- if survey is not none %}
 # Eigen prefixes via deze route-server (IPv{{ rs_family }}) alleen naar
