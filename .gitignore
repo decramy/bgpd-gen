@@ -6,6 +6,7 @@ netbox-token
 output/
 as-sets.txt
 generate.log
+rtbh-surveys/
 
 # Python
 __pycache__/

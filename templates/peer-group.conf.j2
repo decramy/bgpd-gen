@@ -73,6 +73,30 @@ neighbor {{ session.remote_ip }} {
 # nieuwe bilaterale peer die zelf op deze lijst staat, moet dat opnieuw.
 deny quick from {{ session.remote_ip }} transit-as { {{ transit_networks | join(', ') }} }
 {%- endif %}
+{%- if session.relationship == 'Route Server' and session.peering_network %}
+{%- set rs_is_v6 = ':' in session.remote_ip %}
+{%- set rs_family = 6 if rs_is_v6 else 4 %}
+{%- set survey = rtbh_survey_by_fabric.get((session.peering_network.fabric, rs_family)) %}
+{%- if survey is not none %}
+# Eigen prefixes via deze route-server (IPv{{ rs_family }}) alleen naar
+# deelnemers die RTBH aantoonbaar toepassen (rtbh_survey.py --family
+# {{ rs_family }}, resultaat in rtbh-surveys/*-v{{ rs_family }}.txt -
+# {{ survey | length }} OK-ASN(s) op dit moment - v4/v6 zijn bewust losse
+# survey-resultaten, RTBH-gedrag over de ene family garandeert niets over
+# de andere). IXP Manager-communityschema (het RS-AS is {{ session.peer_asn }}):
+# <rs-asn>:0:0 weerhoudt de route van alle deelnemers via deze RS, een
+# losse <rs-asn>:1:<asn> geeft daar per AS een uitzondering op boven op.
+# Default-deny, niet default-allow-met-losse-uitsluitingen: bij de eerste
+# FrysIX-survey waren er ruim vier keer zoveel FAIL als OK, dus een
+# allow-lijst is de kortere configuratie. Geen survey ooit gedraaid voor
+# deze fabric/family = deze regel wordt helemaal niet gegenereerd
+# (fail-open, zie generate.py's _rtbh_survey_by_fabric), dus dit is puur
+# opt-in per fabric+family.
+{% for p in own_prefixes if (':' in p) == rs_is_v6 %}
+allow to {{ session.remote_ip }} prefix {{ p }} or-longer set { large-community {{ session.peer_asn }}:0:0{% for asn in survey %} large-community {{ session.peer_asn }}:1:{{ asn }}{% endfor %} }
+{%- endfor %}
+{%- endif %}
+{%- endif %}
 {%- if session.relationship == 'Bilateral Peering' and session.irr_as_set %}
 {%- set fam = 'v6' if ':' in session.remote_ip else 'v4' %}
 # Directe peer: alleen routes toestaan die door de eigen IRR as-set ({{ session.irr_as_set }}) zijn gedekt.

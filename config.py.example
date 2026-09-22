@@ -37,3 +37,8 @@ RELATIONSHIP_IDS = {
 # RFC 5737 (TEST-NET-1)/RFC 3849 placeholders, geen echte testadressen.
 CANARY_V4 = "203.0.113.1"
 CANARY_V6 = "2001:db8::1"
+
+# Alleen voor rtbh_survey.py: e-mailadres voor meldingen zodra een IX-
+# deelnemer van RTBH-gedrag wisselt t.o.v. de vorige survey-run. Optioneel -
+# leeg laten (of weglaten) betekent alleen een logregel, geen e-mail.
+NOTIFY_EMAIL = "you@example.org"

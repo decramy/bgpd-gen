@@ -28,7 +28,7 @@ import urllib.parse
 import jinja2
 
 from lib.cli import run_main, setup_logging
-from lib.config import AS_SETS_FILE, NETBOX_BASE, OUTPUT_DIR, PEERS_DIR, RELATIONSHIP_IDS, TEMPLATES_DIR
+from lib.config import AS_SETS_FILE, NETBOX_BASE, OUTPUT_DIR, PEERS_DIR, RELATIONSHIP_IDS, RTBH_SURVEYS_DIR, TEMPLATES_DIR
 from lib.errors import BgpdGenError
 from lib.netbox import load_token, netbox_get
 from lib.router import device_id_from_router, get_router, get_scope
@@ -247,6 +247,41 @@ def _transit_networks(token: str) -> list[int]:
     return sorted(int(e["pattern"]) for e in ours)
 
 
+def _rtbh_survey_by_fabric(token: str) -> dict[tuple[str, int], list[int]]:
+    """{(fabric-naam, family): [OK-ASNs]} voor elke (fabric, family)-
+    combinatie die ooit een 'rtbh_survey.py <fabric>'-run heeft gehad
+    (rtbh-surveys/<fabric-slug>-v<4|6>.txt bestaat dan,
+    lib/config.RTBH_SURVEYS_DIR - platte tekst, geen NetBox-object: dit is
+    een tussentijds testresultaat, geen beheerde configuratie-invoer zoals
+    de transit-AS-lijst). v4 en v6 zijn bewust losse bestanden/resultaten -
+    RTBH-gedrag over de ene family garandeert niets over de andere
+    (rtbh_survey.py meldt een verschil zelf al met een WARN bij het
+    draaien). Een (fabric, family)-combinatie die nooit gesurveyd is, komt
+    hier helemaal niet in voor - peer-group.conf.j2 laat de route-server-
+    community-beperking dan gewoon achterwege voor die ene family
+    (fail-open: pas restrictief zodra er daadwerkelijk sweep-data is,
+    nooit stilzwijgend blokkeren vóór er ooit een survey gedraaid heeft)."""
+    fabrics = netbox_get("/plugins/bgp/peering-fabric/?limit=0", token)["results"]
+
+    result: dict[tuple[str, int], list[int]] = {}
+    for f in fabrics:
+        slug = f["name"].lower().replace(" ", "-")
+        for family in (4, 6):
+            path = RTBH_SURVEYS_DIR / f"{slug}-v{family}.txt"
+            if not path.exists():
+                continue
+            oks = []
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                asn_str, verdict = line.split()
+                if verdict == "OK":
+                    oks.append(int(asn_str))
+            result[(f["name"], family)] = sorted(oks)
+    return result
+
+
 def _peering_lan_prefixes(token: str) -> list[str]:
     """Peering-LAN-prefixes van elke fabric (netbox-peering-manager
     PeeringNetwork), voor de globale 'nooit de IX/upstream's eigen
@@ -295,6 +330,7 @@ def build_context(token: str) -> tuple[dict, list[str]]:
         "connected_networks": _connected_networks(token, device_id),
         "peering_lan_prefixes": _peering_lan_prefixes(token),
         "transit_networks": _transit_networks(token),
+        "rtbh_survey_by_fabric": _rtbh_survey_by_fabric(token),
         "groups": [g.lower().replace(" ", "-") for g in groups],
         "local_asn": router["asn"]["asn"],
         "router_id_ip": primary_ip4.split("/")[0],
@@ -323,7 +359,12 @@ def cmd_render_main_config(args: argparse.Namespace) -> None:
     for g in groups:
         slug = g.lower().replace(" ", "-")
         group_sessions = [s for s in context["sessions"] if _group_key(s) == g]
-        content = peer_group_tpl.render(group_name=g, sessions=group_sessions, transit_networks=context["transit_networks"])
+        content = peer_group_tpl.render(
+            group_name=g, sessions=group_sessions,
+            transit_networks=context["transit_networks"],
+            rtbh_survey_by_fabric=context["rtbh_survey_by_fabric"],
+            own_prefixes=context["own_prefixes"],
+        )
         atomic_write(OUTPUT_DIR / "peers" / f"{slug}.conf", content.strip() + "\n")
         args.log.info("geschreven: peers/%s.conf", slug)
 

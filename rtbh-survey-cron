@@ -1,0 +1,13 @@
+# RTBH-survey van Frys-IX elk uur (rtbh_survey.py) - draait vóór
+# generate.py's eigen cron (netbox-bgpq4-cron, 5 * * * *) zodat die telkens
+# verse sweep-data meekrijgt. Draait als root (nodig voor 'bgpctl network
+# add/delete'). Mailt NOTIFY_EMAIL (config.py) zodra een deelnemer van
+# RTBH-gedrag wisselt t.o.v. de vorige run.
+#
+# Bewuste keuze om dit elk uur te draaien, ondanks dat het intrusief is
+# tegen externe netwerken (een korte blackhole richting elke deelnemer die
+# RTBH honoreert, elk uur opnieuw) - rtbh_survey.py zelf draait normaal
+# gesproken bewust NIET vanuit cron; dit is een expliciete uitzondering.
+#
+# Nog een fabric erbij surveyen: kopieer de regel en pas de fabricnaam aan.
+0 * * * * root /usr/bin/python3 /opt/bgpd-gen/rtbh_survey.py 'Frys-IX' >> /opt/bgpd-gen/rtbh-survey.log 2>&1
