@@ -53,6 +53,26 @@ neighbor {{ session.remote_ip }} {
 	enforce neighbor-as no
 {%- endif %}
 }
+{%- if session.relationship == 'Bilateral Peering' and transit_networks %}
+# Bekende transit-netwerken mogen niet als tussenliggende hop in het pad
+# van een bilaterale sessie voorkomen (bgpfilterguide.nlnog.net,
+# "Filtering Known Transit Networks":
+# https://bgpfilterguide.nlnog.net/guides/no_transit_leaks/) - een
+# bilaterale peer die zo'n AS als transit-hop meestuurt, lekt
+# waarschijnlijk hun eigen upstream-pad naar ons (een route-leak), geen
+# legitieme aankondiging van hun eigen ruimte. Bewust beperkt tot
+# Bilateral Peering: transit-sessies (ColoClue) horen de volle tabel te
+# geven inclusief deze ASNs als transit-hop, en route-server-sessies
+# (Frys-IX) bleken in de praktijk ook legitiem multi-hop paden te dragen
+# - sommige IX-deelnemers zijn zelf transitproviders die hun eigen
+# klanten via de route-server doorgeven (bv. Hurricane Electric,
+# empirisch gevonden bij de RTBH-sweep van deze IX). Lijst (uit NetBox,
+# AsPath 'known-transit-networks') overgenomen van de guide (grote
+# tier-1/tier-2-operators); handmatig gecontroleerd tegen onze eigen
+# bilaterale peers (geen overlap) zoals de guide zelf aanraadt - bij een
+# nieuwe bilaterale peer die zelf op deze lijst staat, moet dat opnieuw.
+deny quick from {{ session.remote_ip }} transit-as { {{ transit_networks | join(', ') }} }
+{%- endif %}
 {%- if session.relationship == 'Bilateral Peering' and session.irr_as_set %}
 {%- set fam = 'v6' if ':' in session.remote_ip else 'v4' %}
 # Directe peer: alleen routes toestaan die door de eigen IRR as-set ({{ session.irr_as_set }}) zijn gedekt.

@@ -139,6 +139,22 @@ prefix-set "bogons" {
 }
 deny quick from any prefix-set "bogons"
 
+# Peering-LAN-prefixes nooit als BGP-geleerde route accepteren
+# (bgpfilterguide.nlnog.net, "No IXP Leaks":
+# https://bgpfilterguide.nlnog.net/guides/no_ixp_leaks/) - een IX of
+# upstream mag zijn eigen shared-LAN-prefix nooit van een andere neighbor
+# aangeboden krijgen. Expliciet gevaar dat de guide noemt: vergroot de
+# IX/upstream zijn LAN later, dan kan een BGP-geleerde route voor het
+# oude, specifiekere subnet buren op dat LAN (incl. de BGP-sessie zelf)
+# plots indirect via een gateway laten routeren i.p.v. direct. Bewust
+# gebaseerd op netbox-peering-manager's eigen PeeringNetwork-objecten
+# (peering_lan_prefixes), niet op _connected_networks hieronder/de eigen
+# interfaceconfiguratie - anders zou precies dat "verouderde aanname"-
+# scenario zich ook in dit filter zelf herhalen.
+{% for net in peering_lan_prefixes %}
+deny quick from any prefix {{ net }} or-longer
+{%- endfor %}
+
 # Bogon AS-nummers in het pad: AS_TRANS (misconfiguratie-indicator),
 # privé/gereserveerde 16- en 32-bit ASNs horen niet in de publieke DFZ.
 deny quick from any AS 23456
@@ -147,6 +163,16 @@ deny quick from any AS 4200000000 - 4294967295
 
 # Te lang AS-pad: symptoom van een route-leak of kapotte announce.
 deny from any max-as-len 100
+
+# Excessief veel communities wegknippen (bgpfilterguide.nlnog.net, "Many
+# Communities": https://bgpfilterguide.nlnog.net/guides/many_communities/)
+# - sommige netwerken/route-servers hangen tientallen tot honderden
+# communities aan een route zonder functie buiten hun eigen AS; dat kost
+# geheugen zonder nut. Drempel (100) en aanpak (bij overschrijding alles
+# wissen i.p.v. selectief) rechtstreeks uit de guide.
+match from any max-communities 100 set { community delete *:* }
+match from any max-ext-communities 100 set { ext-community delete * * }
+match from any max-large-communities 100 set { large-community delete *:*:* }
 
 # RTBH-uitzondering op de kleine-prefix-filter hieronder (RFC 7999
 # BLACKHOLE-community of de informele <eigen-asn>:666-variant): moet vóór

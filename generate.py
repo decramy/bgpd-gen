@@ -226,6 +226,46 @@ def _connected_networks(token: str, device_id: int) -> list[str]:
     return sorted(networks)
 
 
+TRANSIT_AS_PATH_NAME = "known-transit-networks"
+
+
+def _transit_networks(token: str) -> list[int]:
+    """ASNs uit de NetBox AsPath 'known-transit-networks' (netbox-routing
+    objects/as-path + as-path-entry), voor de no_transit_leaks-regel in
+    peer-group.conf.j2 (bgpfilterguide.nlnog.net, "Filtering Known Transit
+    Networks": https://bgpfilterguide.nlnog.net/guides/no_transit_leaks/).
+    Client-side gefilterd op aspath - as-path-entry's aspath_id/pattern-
+    filters bleken bij het aanmaken van deze lijst hetzelfde genegeerd-
+    filter-euvel te hebben als prefix-list?name= elders in dit project
+    (leverden alsnog 'gevonden' bestaande entries op voor ASNs die niet
+    bestonden) - dus ook hier de volledige, ongefilterde lijst ophalen en
+    zelf filteren, niet op een servergefilterd resultaat vertrouwen."""
+    entries = netbox_get("/plugins/routing/objects/as-path-entry/?limit=0", token)["results"]
+    ours = [e for e in entries if e["aspath"]["name"] == TRANSIT_AS_PATH_NAME]
+    if not ours:
+        return []
+    return sorted(int(e["pattern"]) for e in ours)
+
+
+def _peering_lan_prefixes(token: str) -> list[str]:
+    """Peering-LAN-prefixes van elke fabric (netbox-peering-manager
+    PeeringNetwork), voor de globale 'nooit de IX/upstream's eigen
+    peering-LAN als BGP-geleerde route accepteren'-regel
+    (bgpfilterguide.nlnog.net, "No IXP Leaks":
+    https://bgpfilterguide.nlnog.net/guides/no_ixp_leaks/). Bewust een
+    aparte, PeeringNetwork-gebaseerde bron i.p.v. _connected_networks()
+    hergebruiken: de guide waarschuwt specifiek voor het geval dat de
+    lokale interface nog de oude, kleinere subnetgrootte heeft
+    geconfigureerd terwijl de IX 'm inmiddels vergrootte - in dat scenario
+    zou een uit de eigen interface afgeleide waarde (connected_networks)
+    exact dezelfde, mogelijk verouderde aanname bevatten en dus niet
+    beschermen. PeeringNetwork is de losse, bewust bijgehouden bron van
+    waarheid voor de daadwerkelijke LAN-grootte, ongeacht wat er op de
+    eigen interface staat."""
+    nets = netbox_get("/plugins/bgp/peering-network/?limit=0", token)["results"]
+    return sorted({n["prefix"]["prefix"] for n in nets})
+
+
 def _group_key(session: dict) -> str:
     pn = session.get("peering_network")
     return pn["fabric"] if pn else session["peer_name"]
@@ -253,6 +293,8 @@ def build_context(token: str) -> tuple[dict, list[str]]:
         "sessions": sessions,
         "own_prefixes": _own_prefixes(token, device_id),
         "connected_networks": _connected_networks(token, device_id),
+        "peering_lan_prefixes": _peering_lan_prefixes(token),
+        "transit_networks": _transit_networks(token),
         "groups": [g.lower().replace(" ", "-") for g in groups],
         "local_asn": router["asn"]["asn"],
         "router_id_ip": primary_ip4.split("/")[0],
@@ -281,7 +323,7 @@ def cmd_render_main_config(args: argparse.Namespace) -> None:
     for g in groups:
         slug = g.lower().replace(" ", "-")
         group_sessions = [s for s in context["sessions"] if _group_key(s) == g]
-        content = peer_group_tpl.render(group_name=g, sessions=group_sessions)
+        content = peer_group_tpl.render(group_name=g, sessions=group_sessions, transit_networks=context["transit_networks"])
         atomic_write(OUTPUT_DIR / "peers" / f"{slug}.conf", content.strip() + "\n")
         args.log.info("geschreven: peers/%s.conf", slug)
 
