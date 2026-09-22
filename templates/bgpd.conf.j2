@@ -70,9 +70,15 @@ deny to any avs invalid
 network {{ p }}
 {%- endfor %}
 
-# Eigen prefixes altijd mogen aankondigen
+# Eigen prefixes altijd mogen aankondigen. 'or-longer' (niet alleen de
+# exacte prefix) is nodig voor RTBH: een dynamisch toegevoegde /32-/128-
+# canary/blackhole-route uit eigen ruimte is een more-specific van dit
+# blok en zou zonder or-longer hier stilzwijgend door de globale
+# 'deny to any' onderaan geweigerd worden - net zo'n zelf-veroorzaakte
+# blokkade als de eerdere roa-set-maxlen-beperking, andere kant van
+# dezelfde RTBH-vereiste (zie ook de roa-set hierboven).
 {% for p in own_prefixes %}
-allow to any prefix {{ p }}
+allow to any prefix {{ p }} or-longer
 {%- endfor %}
 
 # Beheerde prefix-sets (default-only/full-table/per-peer aanvullingen) -

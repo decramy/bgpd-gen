@@ -78,6 +78,19 @@ def local_asn() -> int:
     return _local_asn_cache
 
 
+def flow_rate_asn() -> int:
+    """De 'flow-rate'-ext-community (RFC 5575) heeft een 2-byte AS-nummerveld
+    - een 4-byte-only ASN (>65535, zoals de meeste recent uitgegeven ASNs)
+    past daar niet in en bgpctl weigert 'm dan hard ('Bad ext-community ...
+    is too large', empirisch bevestigd). Het AS-deel is voor deze actie
+    sowieso alleen een label - de rate-waarde (0 = discard) draagt de
+    daadwerkelijke betekenis - dus terugvallen op 0 is de gangbare/veilige
+    keuze i.p.v. de test te laten falen op een AS-nummer dat toevallig niet
+    past."""
+    asn = local_asn()
+    return asn if asn <= 0xFFFF else 0
+
+
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
@@ -224,7 +237,7 @@ def rtbh_test(cl, neighbor_ip, canary, family):
         )
         return
 
-    bgpctl("network", "add", canary_pfx, "set", "community", RTBH_COMMUNITY)
+    bgpctl("network", "add", canary_pfx, "community", RTBH_COMMUNITY)
     try:
         time.sleep(PROPAGATION_WAIT)
         still_reachable = ping_ok(neighbor_ip, family, source=canary)
@@ -268,7 +281,7 @@ def flowspec_test(cl, neighbor_ip, canary, family):
         return
 
     try:
-        asn = local_asn()
+        asn = flow_rate_asn()
     except BgpdGenError as e:
         cl.add(
             "Flowspec", Status.SKIP,
