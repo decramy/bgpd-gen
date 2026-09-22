@@ -148,35 +148,50 @@ deny quick from any AS 4200000000 - 4294967295
 # Te lang AS-pad: symptoom van een route-leak of kapotte announce.
 deny from any max-as-len 100
 
-# Prefixlengte-sanity: ook via een full-table-peer geen absurd korte
-# (< /8 v4, < /16 v6) of lange (> /24 v4, > /48 v6) prefixes accepteren.
+# RTBH-uitzondering op de kleine-prefix-filter hieronder (RFC 7999
+# BLACKHOLE-community of de informele <eigen-asn>:666-variant): moet vóór
+# die filter staan, niet erna. 'deny quick' stopt de regel-evaluatie
+# meteen zodra 'm matcht - een /32 werd hier altijd al door de kleine-
+# prefix-filter geweigerd, vóórdat een latere community-regel ooit bereikt
+# werd. (Precies deze bug zat er eerder in: de vorige versie van deze
+# config had de blackhole-community-afhandeling ná de kleine-prefix-
+# filter staan, als losse 'match'-regel - 'match' beslist zelf niet
+# accept/reject, dus zonder een eigen 'allow' vóór de kleine-prefix-deny
+# werd een binnenkomende RTBH-/32 gewoon stilzwijgend geweigerd. Nooit
+# opgemerkt omdat alleen de verzendkant (eigen RTBH naar peers) tot nu toe
+# getest was, nooit de ontvangkant.)
+# 'allow quick ... set { nexthop blackhole }' doet accepteren én nexthop-
+# herschrijven in één regel, en accepteert ook als ovs eerder invalid/
+# not-found was (de 'deny from any ovs invalid' hierboven, niet quick) -
+# net als bij onze eigen uitgaande RTBH-opzet (zie de roa-set hierboven)
+# is vereisen dat een aanvaller vooraf een ROA registreert voor het
+# specifieke doelwit niet werkbaar tijdens een echte aanval. Nog altijd
+# wél onderworpen aan de bogon-/AS-pad-controles hierboven. Bewust beperkt
+# tot exacte host-routes (/32, /128) - zonder die beperking zou een
+# kwaadwillende of verkeerd geconfigureerde peer een heel blok kunnen
+# laten blackholen i.p.v. alleen de eigen host. 'prefixlen 32' zonder
+# expliciete operator geeft een kale syntax error - de '='-operator is
+# hier, anders dan bij bv. AS-nummers, niet optioneel (empirisch
+# bevestigd met bgpd -n, niet uit de man page af te leiden).
+allow quick from any inet prefixlen = 32 community BLACKHOLE set { nexthop blackhole }
+allow quick from any inet6 prefixlen = 128 community BLACKHOLE set { nexthop blackhole }
+allow quick from any inet prefixlen = 32 community local-as:666 set { nexthop blackhole }
+allow quick from any inet6 prefixlen = 128 community local-as:666 set { nexthop blackhole }
+
+# Kleine prefixes weigeren (bgpfilterguide.nlnog.net, "No Small Prefixes":
+# https://bgpfilterguide.nlnog.net/guides/small_prefixes/) - routes kleiner
+# dan /24 (v4) / /48 (v6) horen geen werkende mondiale routering te hebben
+# en zijn een bekend hijack-vector voor gerichte aanvallen op een klein
+# doelwit; de dekkende supernet-route komt toch al via dezelfde feed
+# binnen, dus er gaat niets verloren. RTBH-/32's/-/128's zijn hierboven al
+# expliciet uitgezonderd. Ondergrens (< /8 v4, < /16 v6) is een eigen
+# toevoeging tegen absurd korte/kapotte announces, niet uit die guide.
 deny quick from any inet prefixlen 8 >< 24
 deny quick from any inet6 prefixlen 16 >< 48
 
 # Graceful shutdown (RFC 8326): een peer die netjes aangeeft af te sluiten
 # depriorideren i.p.v. hard weigeren.
 match from any community GRACEFUL_SHUTDOWN set { localpref 0 }
-
-# Blackhole-community (RFC 7999): een peer tagt een route hiermee om aan te
-# geven dat verkeer naar die bestemming lokaal weggegooid mag worden (bv. een
-# klant onder DDoS). 'nexthop blackhole' accepteert/installeert de route wel,
-# maar met een FIB-blackhole-nexthop - de kernel gooit matchend verkeer dan
-# weg i.p.v. het te routeren; de AS-pad-/prefix-filters van de sessie zelf
-# bepalen nog altijd of de route hier überhaupt mag komen, dit verandert
-# alleen de nexthop van een reeds geaccepteerde route. Beide notaties
-# geaccepteerd: de well-known RFC 7999-community (65535:666, hier
-# 'BLACKHOLE') én de informele <eigen-asn>:666-variant ('local-as:666', door
-# bgpd zelf naar het eigen AS-nummer geëxpandeerd). Bewust beperkt tot exacte
-# host-routes (/32, /128) - zonder die beperking zou een kwaadwillende of
-# verkeerd geconfigureerde peer een heel blok kunnen laten blackholen i.p.v.
-# alleen de eigen host. 'prefixlen 32' zonder expliciete operator geeft een
-# kale syntax error - de '='-operator is hier, anders dan bij bv. AS-nummers,
-# niet optioneel (empirisch bevestigd met bgpd -n, niet uit de man page af te
-# leiden).
-match from any inet prefixlen = 32 community BLACKHOLE set { nexthop blackhole }
-match from any inet6 prefixlen = 128 community BLACKHOLE set { nexthop blackhole }
-match from any inet prefixlen = 32 community local-as:666 set { nexthop blackhole }
-match from any inet6 prefixlen = 128 community local-as:666 set { nexthop blackhole }
 
 # Eigen connected networks nooit als BGP-route overnemen: een upstream kan
 # legitiem het netwerk van een gedeeld peering-LAN (bv. een transit- of
