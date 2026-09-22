@@ -1,0 +1,12 @@
+# Secrets / site-specifieke config - zie config.py.example en netbox-token.example
+config.py
+netbox-token
+
+# Gegenereerde output (door 'generate' opnieuw te maken)
+output/
+as-sets.txt
+generate.log
+
+# Python
+__pycache__/
+*.pyc

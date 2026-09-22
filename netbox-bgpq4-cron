@@ -1,0 +1,5 @@
+# Genereert de complete OpenBGPD-config elk uur (as-sets + bgpq4 + hoofdtemplate).
+# Activeren gebeurt hier bewust NIET automatisch - draai
+# 'python3 /opt/bgpd-gen/activate.py' handmatig (of vanuit een eigen,
+# later te bepalen trigger) na controle van de output.
+5 * * * * root /usr/bin/python3 /opt/bgpd-gen/generate.py generate >> /opt/bgpd-gen/generate.log 2>&1

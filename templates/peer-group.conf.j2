@@ -1,0 +1,89 @@
+# Peer-groep: {{ group_name }}
+{%- set incns = namespace(done=[]) %}
+{% for session in sessions %}
+{%- if session.relationship == 'Bilateral Peering' and session.irr_as_set %}
+{%- set macro_file = 'as' ~ session.peer_asn %}
+{%- if macro_file not in incns.done %}
+{%- set incns.done = incns.done + [macro_file] %}
+include "/etc/bgpd/peers/{{ macro_file }}.conf"
+{%- endif %}
+{%- endif %}
+{%- endfor %}
+
+{% for session in sessions %}
+neighbor {{ session.remote_ip }} {
+{%- set fabric = session.peering_network.fabric if session.peering_network else session.peer_name %}
+{%- set short_name = session.name.replace(' (v4)', '').replace(' (v6)', '') if session.peer_name == fabric else session.peer_name %}
+{%- set rel_letter = {'Transit': 'T', 'Route Server': 'R', 'Bilateral Peering': 'P'}.get(session.relationship, '?') %}
+{%- set af_digit = '6' if ':' in session.remote_ip else '4' %}
+	descr "{{ af_digit }}{{ rel_letter }} - {{ fabric }} - {{ short_name }}"
+	remote-as {{ session.peer_asn }}
+{%- if not session.enabled %}
+	down
+{%- endif %}
+{%- if session.password %}
+	password "{{ session.password }}"
+{%- endif %}
+{%- if session.ttl %}
+	ttl-security yes
+	tcp md5sig
+{%- endif %}
+{%- if session.bfd_profile %}
+	# BFD-profiel '{{ session.bfd_profile.name }}': min-tx {{ session.bfd_profile.minimum_interval }}ms, min-rx {{ session.bfd_profile.minimum_rx_interval }}ms, multiplier {{ session.bfd_profile.multiplier }}
+	bfd
+{%- endif %}
+{%- set no_cap = session.relationship in ('Transit', 'Route Server') %}
+{%- if ':' in session.remote_ip and session.ipv6_max_prefixes and not no_cap %}
+	max-prefix {{ session.ipv6_max_prefixes }} restart 15
+{%- elif ':' not in session.remote_ip and session.ipv4_max_prefixes and not no_cap %}
+	max-prefix {{ session.ipv4_max_prefixes }} restart 15
+{%- endif %}
+{%- if session.relationship == 'Route Server' %}
+	# Route-servers relayen routes van andere IX-deelnemers ongewijzigd door:
+	# het AS-pad begint met het AS van de daadwerkelijke aankondiger, niet met
+	# het AS van de route-server zelf. Zonder dit weigert bgpd elke ontvangen
+	# route ("bad path, ... enforce neighbor-as enabled") en valt de sessie
+	# meteen terug naar Idle zodra de eerste update binnenkomt.
+	enforce neighbor-as no
+{%- endif %}
+}
+{%- if session.relationship == 'Bilateral Peering' and session.irr_as_set %}
+{%- set fam = 'v6' if ':' in session.remote_ip else 'v4' %}
+# Directe peer: alleen routes toestaan die door de eigen IRR as-set ({{ session.irr_as_set }}) zijn gedekt.
+# Geen 'prefix-set'-keyword: de macro-waarde is zelf al een 'prefix { ... }'-
+# clausule (bgpq4-formaat), geen aparte prefix-set-naam.
+allow from {{ session.remote_ip }} $prefix_set_as{{ session.peer_asn }}_{{ fam }}
+{%- for af in session.address_families %}
+{%- if af.prefix_list_in %}
+# Handmatige aanvulling vanuit NetBox (bv. RFC1918-uitwisseling), additief bovenop de IRR-filter
+allow from {{ session.remote_ip }} prefix-set "{{ af.prefix_list_in.name }}"
+{%- endif %}
+{%- endfor %}
+{%- else %}
+{%- for af in session.address_families %}
+{%- if af.prefix_list_in %}
+allow from {{ session.remote_ip }} prefix-set "{{ af.prefix_list_in.name }}"
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+{%- for af in session.address_families %}
+{%- if af.prefix_list_out %}
+allow to {{ session.remote_ip }} prefix-set "{{ af.prefix_list_out.name }}"
+{%- endif %}
+{%- if af.route_map_in %}
+# route-map-in '{{ af.route_map_in.name }}' - vertaal naar match/set-condities indien nodig
+{%- endif %}
+{%- if af.route_map_out %}
+# route-map-out '{{ af.route_map_out.name }}' - vertaal naar match/set-condities indien nodig
+{%- endif %}
+{%- endfor %}
+{%- if session.maintenance %}
+# Onderhoudsmodus (NetBox-tag 'maintenance' op de sessie, het peer-ASN of de fabric/IX):
+# sessie blijft Established (geen 'down'), maar deze twee regels overrulen als allerlaatste
+# match élke eerder toegestane import/export voor deze neighbor hierboven - inclusief een
+# eventuele IRR-macro-allow en de globale 'allow to any prefix <eigen-prefix>' verderop in
+# bgpd.conf.
+deny quick from {{ session.remote_ip }}
+deny quick to {{ session.remote_ip }}
+{%- endif %}
+{% endfor %}

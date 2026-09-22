@@ -1,0 +1,39 @@
+"""
+config.py - site-specifieke instellingen voor generate.py/activate.py/
+add_peer.py/render_irr_policy.py/verify_protection.py (via lib/config.py).
+
+Kopieer dit bestand naar config.py (in dezelfde map) en vul de waarden in
+voor jouw omgeving. config.py zelf staat in .gitignore en wordt dus nooit
+gecommit - dit .example-bestand is de enige versie die in git zit.
+"""
+
+# Basis-URL van de NetBox-API die dit script bevraagt (zonder trailing slash).
+NETBOX_BASE = "https://netbox.example.org/api"
+
+# NetBox BGPRouter-id van de router die dit script bedient. Dit script
+# bedient precies één router. Lijst om uit te kiezen:
+#   <NETBOX_BASE>/plugins/routing/bgp/router/  (of in de NetBox-UI)
+ROUTER_ID = 1
+
+# NetBox Relationship-id's (plugin netbox-peering-manager) per peering-type.
+# Dit zijn zelf aangemaakte Relationship-objecten, geen standaard NetBox-
+# keuzevelden - hun naam/slug kan dus per installatie verschillen, vandaar
+# dat de scripts op id matchen. Lijst om uit te kiezen:
+#   <NETBOX_BASE>/plugins/bgp/relationship/  (of in de NetBox-UI)
+RELATIONSHIP_IDS = {
+    "transit": 1,
+    "route-server": 2,
+    "bilateral-peering": 3,
+}
+
+# Alleen voor verify_protection.py (RTBH/Flowspec-peerverificatie): eigen
+# IPv4-/IPv6-testadressen ("canary's"), los van elke productieroute. Beide
+# zijn op zich optioneel (verify_protection.py leidt uit het opgegeven
+# neighbor-IP af welke nodig is), maar minstens één moet ingevuld zijn wil
+# je dat script kunnen gebruiken. De canary's zelf opzetten (loopback-
+# binding, los IRR route-object, losse RPKI ROA met max-length 32/128) is
+# eenmalige, site-specifieke infrastructuur - geen onderdeel van dit
+# configuratiebestand of van de scripts zelf. Onderstaande waarden zijn
+# RFC 5737 (TEST-NET-1)/RFC 3849 placeholders, geen echte testadressen.
+CANARY_V4 = "203.0.113.1"
+CANARY_V6 = "2001:db8::1"

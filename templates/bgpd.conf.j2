@@ -1,0 +1,183 @@
+# Gegenereerd vanuit NetBox door generate.py - niet handmatig bewerken.
+# NetBox: {{ netbox_host }}
+# Router: {{ router_name }} (NetBox BGPRouter #{{ router_netbox_id }}, AS{{ local_asn }})
+# Device: {{ device.name }}{% if device.site %} ({{ device.site.name }}){% endif %} (NetBox device #{{ device_netbox_id }})
+# Laatst gegenereerd: {{ generated_at }}
+# Splitconfig: dit blok + één include-file per provider/IX in peers/*.conf
+
+{% if local_asn %}
+AS {{ local_asn }}
+{% else %}
+# LET OP: geen sessions gevonden, kon local-AS niet afleiden.
+# AS <vul-hier-in>
+{% endif %}
+router-id {{ router_id_ip }}
+
+# Restricted (read-only) controlesocket t.b.v. bgplgd (looking-glass-API).
+# Los van de standaard socket - bgplgd draait als onbevoorrechte gebruiker
+# en kan hiermee alleen read-only bgpctl-commando's uitvoeren, geen config
+# wijzigen. bgplgd zelf is alleen via nginx bereikbaar, met ferm beperkt tot
+# birdie's IP's (nooit rechtstreeks vanaf het publieke internet).
+socket "/run/openbgpd/bgpd.rsock" restricted
+
+# --- RPKI Route Origin Validation ---
+# Verwacht een validator op localhost:3323 (bijv. Routinator, lokaal via apt geinstalleerd).
+# Zonder draaiende validator faalt bgpd NIET hard op deze sessie-definitie, maar
+# 'ovs'-matches blijven dan permanent 'not-found' totdat de validator actief is.
+rtr 127.0.0.1 {
+	descr "routinator"
+	port 3323
+}
+
+# --- ASPA Path Validation ---
+# ASPA-data komt mee via dezelfde rtr-sessie als de validator het ondersteunt (RFC 9582).
+# Ondersteunt de validator nog geen ASPA, dan blijft avs simpelweg 'unknown' (geen impact).
+
+# --- Statische roa-set voor eigen prefixes (fallback / zolang er geen validator draait) ---
+roa-set {
+{%- for p in own_prefixes %}
+	{{ p }} maxlen {{ p.split('/')[1] }} source-as {{ local_asn or '<eigen-asn>' }}
+{%- endfor %}
+}
+
+# --- Globale reject-by-default filterketen (MANRS-stijl: expliciet afwijzen, niet impliciet) ---
+deny from any
+deny to any
+
+# RPKI: origin-invalid altijd weigeren, ongeacht welke peer het aanbiedt
+deny from any ovs invalid
+deny to any ovs invalid
+
+# ASPA: path-invalid altijd weigeren (bescherming tegen route-hijacks via ongeautoriseerde upstreams)
+deny from any avs invalid
+deny to any avs invalid
+
+# Eigen prefixes: network-statement (originate) + advertisement-allow, uit
+# NetBox StaticRoute-objecten gekoppeld aan dit device (zonder network-
+# statement heeft bgpd niets om te versturen, ook al staat een allow-to-any-
+# regel dit toe).
+{% for p in own_prefixes %}
+network {{ p }}
+{%- endfor %}
+
+# Eigen prefixes altijd mogen aankondigen
+{% for p in own_prefixes %}
+allow to any prefix {{ p }}
+{%- endfor %}
+
+# Beheerde prefix-sets (default-only/full-table/per-peer aanvullingen) -
+# apart gegenereerd (generate-prefix-lists): NetBox's PrefixList/PrefixListEntry
+# leveren zelf geen bgpd-syntax, dat wordt hier lokaal gerenderd.
+include "/etc/bgpd/peers/prefix-lists.conf"
+
+{% for g in groups %}
+include "/etc/bgpd/peers/{{ g }}.conf"
+{%- endfor %}
+
+# --- BCP38 (anti-spoofing) ---
+# Zit hier bewust NIET in: dat is bron-IP-filtering (uRPF / pf-regels op de interfaces),
+# geen BGP-daemon-instelling. Los op te zetten op het OS-niveau van deze router.
+
+# --- MANRS ---
+# Geen aan/uit-schakelaar. Bereikt door de combinatie van: RPKI ROV (boven), ASPA (boven),
+# IRR/max-prefix-filtering (per-peer, zie peers/*.conf), en geregistreerde contactgegevens
+# (whois/PeeringDB - buiten deze config).
+
+# --- Laatste vangnet: overgenomen uit /usr/share/doc/openbgpd/examples/bgpd.conf ---
+# Staat bewust HELEMAAL ONDERAAN (na alle peer-includes hierboven): OpenBGPD
+# evalueert filterregels in volgorde en de laatst-matchende regel wint, dus
+# deze 'deny'-regels overrulen zelfs een eerder, te ruim geformuleerde 'allow'
+# van een individuele peer (bv. een full-table-peer die per ongeluk toch een
+# bogon of absurd lange/korte prefix zou proberen aan te bieden).
+
+# Bogon-prefixes: horen nooit in de globale routeringstabel voor te komen
+# (RFC1918/CGN/documentatie/link-local/multicast/gereserveerd, v4 en v6).
+prefix-set "bogons" {
+	0.0.0.0/8 or-longer
+	10.0.0.0/8 or-longer
+	100.64.0.0/10 or-longer
+	127.0.0.0/8 or-longer
+	169.254.0.0/16 or-longer
+	172.16.0.0/12 or-longer
+	192.0.2.0/24 or-longer
+	192.88.99.0/24 or-longer
+	192.168.0.0/16 or-longer
+	198.18.0.0/15 or-longer
+	198.51.100.0/24 or-longer
+	203.0.113.0/24 or-longer
+	224.0.0.0/4 or-longer
+	240.0.0.0/4 or-longer
+	::/8 or-longer
+	0100::/64 or-longer
+	2001:2::/48 or-longer
+	2001:10::/28 or-longer
+	2001:db8::/32 or-longer
+	2002::/16 or-longer
+	3ffe::/16 or-longer
+	3fff::/20 or-longer
+	5f00::/16 or-longer
+	fc00::/7 or-longer
+	fe80::/10 or-longer
+	fec0::/10 or-longer
+	ff00::/8 or-longer
+}
+deny quick from any prefix-set "bogons"
+
+# Bogon AS-nummers in het pad: AS_TRANS (misconfiguratie-indicator),
+# privé/gereserveerde 16- en 32-bit ASNs horen niet in de publieke DFZ.
+deny quick from any AS 23456
+deny quick from any AS 64496 - 131071
+deny quick from any AS 4200000000 - 4294967295
+
+# Te lang AS-pad: symptoom van een route-leak of kapotte announce.
+deny from any max-as-len 100
+
+# Prefixlengte-sanity: ook via een full-table-peer geen absurd korte
+# (< /8 v4, < /16 v6) of lange (> /24 v4, > /48 v6) prefixes accepteren.
+deny quick from any inet prefixlen 8 >< 24
+deny quick from any inet6 prefixlen 16 >< 48
+
+# Graceful shutdown (RFC 8326): een peer die netjes aangeeft af te sluiten
+# depriorideren i.p.v. hard weigeren.
+match from any community GRACEFUL_SHUTDOWN set { localpref 0 }
+
+# Blackhole-community (RFC 7999): een peer tagt een route hiermee om aan te
+# geven dat verkeer naar die bestemming lokaal weggegooid mag worden (bv. een
+# klant onder DDoS). 'nexthop blackhole' accepteert/installeert de route wel,
+# maar met een FIB-blackhole-nexthop - de kernel gooit matchend verkeer dan
+# weg i.p.v. het te routeren; de AS-pad-/prefix-filters van de sessie zelf
+# bepalen nog altijd of de route hier überhaupt mag komen, dit verandert
+# alleen de nexthop van een reeds geaccepteerde route. Beide notaties
+# geaccepteerd: de well-known RFC 7999-community (65535:666, hier
+# 'BLACKHOLE') én de informele <eigen-asn>:666-variant ('local-as:666', door
+# bgpd zelf naar het eigen AS-nummer geëxpandeerd). Bewust beperkt tot exacte
+# host-routes (/32, /128) - zonder die beperking zou een kwaadwillende of
+# verkeerd geconfigureerde peer een heel blok kunnen laten blackholen i.p.v.
+# alleen de eigen host. 'prefixlen 32' zonder expliciete operator geeft een
+# kale syntax error - de '='-operator is hier, anders dan bij bv. AS-nummers,
+# niet optioneel (empirisch bevestigd met bgpd -n, niet uit de man page af te
+# leiden).
+match from any inet prefixlen = 32 community BLACKHOLE set { nexthop blackhole }
+match from any inet6 prefixlen = 128 community BLACKHOLE set { nexthop blackhole }
+match from any inet prefixlen = 32 community local-as:666 set { nexthop blackhole }
+match from any inet6 prefixlen = 128 community local-as:666 set { nexthop blackhole }
+
+# Eigen connected networks nooit als BGP-route overnemen: een upstream kan
+# legitiem het netwerk van een gedeeld peering-LAN (bv. een transit- of
+# IX-provider's eigen shared-subnet-prefix) meesturen in de volle tabel,
+# maar fib-update
+# (default yes, niet overschreven) zou dan de kernel's eigen 'connected'-
+# route voor dat subnet vervangen door een BGP-geleerde route via een
+# gateway - waarna buren op datzelfde LAN (incl. de BGP-peers zelf) alleen
+# nog indirect/circulair bereikbaar zijn (brak eerder een live sessie: "No
+# route to host"/ENETUNREACH bij het installeren van andere routes met die
+# gateway). Dynamisch vanuit NetBox (IPAddress per Interface van dit
+# Device) - een interface/IP toevoegen is genoeg, geen configwijziging
+# nodig.
+{% for net in connected_networks %}
+deny quick from any prefix {{ net }}
+{%- endfor %}
+
+{% if not sessions %}
+# Geen sessions gevonden.
+{% endif %}
