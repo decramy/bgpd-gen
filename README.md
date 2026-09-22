@@ -96,15 +96,28 @@ te patchen. `build_context()` levert de volledige context zelf.
 - **Max-prefix**: geen cap voor Transit/Route Server - PeeringDB's
   `ipv4_max_prefixes`/`ipv6_max_prefixes` zijn niet representatief voor een
   full-table-sessie. Wel toegepast voor bilaterale peers.
-- **Blackhole-community (RFC 7999)**: een route met de well-known
-  `BLACKHOLE`-community (`65535:666`) of de informele `<eigen-asn>:666`-
-  variant krijgt `nexthop blackhole`, beperkt tot exacte host-routes
-  (`/32`/`/128`) zodat een peer geen heel blok kan laten blackholen.
+- **Blackhole-community (RFC 7999)**: een route (eigen of van een peer) met
+  de well-known `BLACKHOLE`-community (`65535:666`) of de informele
+  `<eigen-asn>:666`-variant krijgt `nexthop blackhole`, beperkt tot exacte
+  host-routes (`/32`/`/128`) zodat niemand een heel blok kan laten
+  blackholen. Voor binnenkomende peer-routes staat deze regel bewust vóór
+  het kleine-prefix-vangnet hieronder (anders zou dat 'm al geweigerd
+  hebben voor de community-regel ooit bereikt wordt).
 - **Eigen prefixes**: NetBox `StaticRoute` gekoppeld aan het Device →
   `network`-statement + `allow to any prefix` + `roa-set`-entry.
 - **Vangnet** (na alle peer-includes, laatste match wint): bogon-prefixes,
-  bogon-AS-nummers, max-AS-path-lengte (100), prefixlengte-sanity (v4
-  /8–/24, v6 /16–/48), graceful shutdown (RFC 8326 → localpref 0).
+  peering-LAN-prefixes van elke fabric (NetBox `PeeringNetwork`, nooit als
+  BGP-geleerde route), bogon-AS-nummers, max-AS-path-lengte (100),
+  communities boven de 100 wegknippen, prefixlengte-sanity (v4 /8–/24, v6
+  /16–/48, met uitzondering voor RTBH-`/32`/`/128`), graceful shutdown
+  (RFC 8326 → localpref 0). Vier van deze ([bgpfilterguide.nlnog.net](https://bgpfilterguide.nlnog.net/)):
+  no small prefixes, no IXP leaks, many communities, filtering known
+  transit networks (dat laatste alleen voor bilaterale peers - een
+  route-server-sessie kan legitiem multi-hop paden dragen van deelnemers
+  die zelf transit leveren).
+- **Transit-AS-lijst**: NetBox `AsPath` "known-transit-networks"
+  (netbox-routing `objects/as-path`), niet in de template gehardcode -
+  aanpassen/uitbreiden kan zonder scriptwijziging.
 - **Connected networks**: interface-IP's van dit Device worden nooit door
   een BGP-geleerde route overschreven (voorkomt fib-update een gedeelde
   peering-LAN-prefix via een gateway laat routeren i.p.v. direct).
