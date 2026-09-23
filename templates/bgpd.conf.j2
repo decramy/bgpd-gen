@@ -81,25 +81,6 @@ network {{ p }}
 allow to any prefix {{ p }} or-longer
 {%- endfor %}
 
-# De RTBH-survey-canary (rtbh_survey.py, CANARY_V4/V6 in config.py) NOOIT
-# naar transit/bilateral/bgp.tools exporteren - alleen naar route-server-
-# sessies (losse 'allow quick'-uitzondering per RS-sessie in
-# peer-group.conf.j2, die hierna komt en dus wint voor die sessies). Zonder
-# deze deny lekt de canary ook naar buggy's transit (ColoClue), die 'm zelf
-# ook kan blackholen of doorrelayen - waardoor rtbh_survey.py niet meer
-# specifiek het Frys-IX-RS-pad meet, maar een mix van RS-gedrag en
-# willekeurig ander blackhole-gedrag elders op het internet (gevonden nadat
-# een paar survey-runs onverklaarbaar veel meer OK-verdicten gaven dan
-# verwacht). Raakt geen andere BLACKHOLE-getagde route - een echte RTBH
-# tijdens een aanval (elk ander adres binnen eigen ruimte) blijft wél
-# overal propageren, zoals bedoeld.
-{%- if canary_v4 %}
-deny to any prefix {{ canary_v4 }}/32
-{%- endif %}
-{%- if canary_v6 %}
-deny to any prefix {{ canary_v6 }}/128
-{%- endif %}
-
 # Beheerde prefix-sets (default-only/full-table/per-peer aanvullingen) -
 # apart gegenereerd (generate-prefix-lists): NetBox's PrefixList/PrefixListEntry
 # leveren zelf geen bgpd-syntax, dat wordt hier lokaal gerenderd.

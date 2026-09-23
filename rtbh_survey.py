@@ -17,30 +17,47 @@ OK op v4, FAIL op v6) wordt aan het eind met een [WARN]-regel gemeld -
 dat is zelf geen fout, maar wel iets om te weten vóór je 'm zonder verder
 kijken vertrouwt.
 
-generate.py/peer-group.conf.j2 lezen deze bestanden terug om onze eigen
-prefixes via de route-server(s) van die fabric alleen naar de OK-ASNs te
-sturen (IXP Manager-communityschema: <rs-asn>:0:0 weerhoudt van iedereen,
-een losse <rs-asn>:1:<asn> geeft uitzondering per AS) - default-deny, niet
-default-allow-met-losse-uitsluitingen: bij de eerste FrysIX-sweep waren er
-ruim vier keer zoveel FAIL als OK, dus een allow-lijst is de kortere
-configuratie.
+Bewust GEEN selectieve export van eigen prefixes op basis van deze data
+(dat bestond eerder wel - IXP Manager-communityschema <rs-asn>:0:0/
+<rs-asn>:1:<asn> - maar is losgehaald: het maakte de test zelf nodeloos
+complex, zie hieronder). Dit script test en rapporteert alleen; wat
+generate.py/peer-group.conf.j2 met de uitkomst doen is aan een latere,
+losse beslissing.
+
+Het probleem dat dit zichtbaar maakt: een RTBH-afspraak heb je met je
+transit (die honoreert 'm dus), maar niet met losse IXP-deelnemers. Tijdens
+een echte aanval via de IXP blijven de meeste deelnemers gewoon verkeer
+doorsturen, RTBH of niet - de enige "oplossing" zonder dit inzicht zou zijn
+de hele IXP te verlaten. Deze test bootst een echte RTBH-activatie zo
+letterlijk mogelijk na: de canary gaat naar ALLE sessies (RS, transit,
+bilateraal - dezelfde 'allow to any prefix X or-longer'-regel als altijd,
+geen uitzonderingen meer), precies zoals een daadwerkelijke incident-
+respons ook zou gaan.
+
+Meting: TTL=1 ICMP-pings vanaf de canary naar elke deelnemers' peering-LAN-
+IP, individueel en parallel (geen fping - die kan de uitgaande TTL niet
+zetten). Buggy heeft zelf een interface op de IXP-peering-LAN, dus een
+daadwerkelijke buur is altijd precies 1 hop weg; TTL=1 dwingt af dat het
+verzoek uitsluitend over die rechtstreekse hop kan, en vangt zo een
+onverwacht indirect pad in buggy's eigen routeringstabel af vóórdat het
+verzoek ooit vertrekt.
 
 Mechanisme, zelfde principe als verify_protection.py maar in bulk en via
-de route-server i.p.v. bilateraal: één gedeelde canary-announcement (niet
-per deelnemer te scopen, dus ook geen reden om 'm dat wel te doen).
-Vijf fasen: (1) nulmeting - fping-sweep van alle deelnemers, (2) canary
-met RTBH-community adverteren, (3) RTBH_WAIT wachten, (4) daadwerkelijke
-test - alleen de deelnemers die bij de nulmeting reageerden opnieuw
-pingen, (5) canary weer intrekken. Wie tijdens fase 4 wegviel, wordt na
-RECOVERY_WAIT nogmaals gepingd (eindmeting): pas als die ook weer
+de route-server i.p.v. bilateraal: (1) nulmeting - TTL=1-sweep van alle
+deelnemers, via de altijd al aanwezige aggregate-prefix (geen aparte
+activatie nodig: de canary zit daar al in besloten). (2) canary met
+BLACKHOLE-community adverteren - naar alles en iedereen. (3) RTBH_WAIT
+wachten. (4) daadwerkelijke test - alleen de nulmeting-responders opnieuw
+pingen. (5) canary weer volledig intrekken (try/finally, ongeacht fouten).
+Wie tijdens fase 4 wegviel, wordt na RECOVERY_WAIT nogmaals gepingd
+(eindmeting, via de weer-aanwezige aggregate): pas als die ook weer
 reageert - dus aantoonbaar wegviel ZOLANG de blackhole actief was en
 terugkwam ZODRA 'm ingetrokken werd - telt het als OK. Wegvallen zonder
 aantoonbaar herstel wordt SKIP (kan een toevallige, ongerelateerde storing
 zijn geweest, geen bevestigd RTBH-gedrag) i.p.v. voorbarig als OK geteld.
 
-Raakt nooit bgpd.conf of NetBox (schrijfrechten) - dat doet de normale
-generate.py-pijplijn, die het resultaatbestand gewoon als input leest
-zodra 'n survey ooit gedraaid heeft.
+Raakt NetBox nooit (schrijfrechten) - alleen bgpd.conf's netwerk-RIB via
+bgpctl (tijdelijk, tijdens de test zelf), en het eigen resultaatbestand.
 
 Kan vanuit cron draaien (netbox-rtbh-survey-cron, elk uur, vóór
 generate.py's eigen cron) - bewuste keuze van de gebruiker, ondanks dat dit
@@ -54,6 +71,7 @@ een logregel, geen harde fout.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -70,7 +88,11 @@ from lib.sessions import build_sessions
 RTBH_COMMUNITY = "65535:666"
 RTBH_WAIT = 30  # seconden na het adverteren van de canary, vóór de daadwerkelijke test - ruimer dan verify_protection.py's 5s: hier gaat het via een route-server naar veel deelnemers tegelijk, niet één bilaterale sessie.
 RECOVERY_WAIT = 30  # seconden na het intrekken van de canary, vóór de eindmeting (herstel-bevestiging)
-FPING_RETRIES = 2  # extra pogingen bovenop de eerste (fping's -r), binnen elke afzonderlijke sweep
+
+PING_COUNT = 2  # pogingen per host, tegen incidentele ICMP-ruis
+PING_TIMEOUT = 1  # seconden wachten op antwoord per poging (ping -W)
+PING_TTL = 1  # buggy zit zelf op de IXP-peering-LAN - een daadwerkelijke buur is altijd 1 hop weg
+PING_WORKERS = 50  # losse ping's per host i.p.v. één fping-sweep (die kan de uitgaande TTL niet zetten) - parallel om de doorlooptijd beperkt te houden
 
 
 def fabric_slug(name: str) -> str:
@@ -106,15 +128,26 @@ def enumerate_participants(rs_ips: list[str]) -> dict[int, str]:
     return result
 
 
-def fping_sweep(ips: list[str], canary: str, family: int) -> set[str]:
-    """Geeft de subset van ips terug die reageerde op een ping vanaf
-    canary. Lege lijst -> lege set (fping accepteert geen lege IP-lijst)."""
+def _ping_one(ip: str, canary: str, family: int) -> bool:
+    cmd = [
+        "ping", "-4" if family == 4 else "-6",
+        "-c", str(PING_COUNT), "-W", str(PING_TIMEOUT), "-t", str(PING_TTL),
+        "-I", canary, ip,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def ping_sweep(ips: list[str], canary: str, family: int) -> set[str]:
+    """Geeft de subset van ips terug die reageerde op een TTL=1-ping vanaf
+    canary - losse ping's per host, parallel (PING_WORKERS tegelijk) omdat
+    fping de uitgaande TTL niet kan zetten. TTL=1 forceert dat het verzoek
+    alleen over de rechtstreekse, direct-verbonden peering-LAN-hop kan."""
     if not ips:
         return set()
-    cmd = ["fping", "-4" if family == 4 else "-6", "-S", canary, "-a",
-           "-r", str(FPING_RETRIES), "-t", "500"] + ips
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    return {ip.strip() for ip in r.stdout.splitlines() if ip.strip()}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PING_WORKERS) as pool:
+        results = pool.map(lambda ip: (ip, _ping_one(ip, canary, family)), ips)
+    return {ip for ip, ok in results if ok}
 
 
 def survey_file_path(fabric: str, family: int):
@@ -220,20 +253,20 @@ def survey_one_family(token: str, fabric: str, family: int, log) -> dict[int, st
     ip_to_asn = {ip: asn for asn, ip in participants.items()}
     all_ips = sorted(ip_to_asn)
 
-    log.info("1. nulmeting (vóór RTBH)...")
-    baseline = fping_sweep(all_ips, canary, family)
+    log.info("1. nulmeting (TTL=1, vóór RTBH)...")
+    baseline = ping_sweep(all_ips, canary, family)
     log.info("nulmeting: %d/%d deelnemers reageren", len(baseline), len(all_ips))
 
     canary_pfx = f"{canary}/{32 if family == 4 else 128}"
-    log.info("2. RTBH-community actief zetten op %s...", canary_pfx)
+    log.info("2. RTBH-community activeren op %s (naar alle sessies - RS, transit, bilateraal)...", canary_pfx)
     bgpctl("network", "add", canary_pfx, "community", RTBH_COMMUNITY)
     try:
         log.info("3. %ds wachten...", RTBH_WAIT)
         time.sleep(RTBH_WAIT)
-        log.info("4. daadwerkelijke test (alleen nulmeting-responders)...")
-        during = fping_sweep(sorted(baseline), canary, family)
+        log.info("4. daadwerkelijke test (TTL=1, alleen nulmeting-responders)...")
+        during = ping_sweep(sorted(baseline), canary, family)
     finally:
-        log.info("5. RTBH-community weer intrekken...")
+        log.info("5. canary volledig intrekken...")
         bgpctl("network", "delete", canary_pfx)
 
     dropped = baseline - during
@@ -242,8 +275,8 @@ def survey_one_family(token: str, fabric: str, family: int, log) -> dict[int, st
         log.info("%d deelnemer(s) stopten met reageren tijdens RTBH - %ds wachten vóór eindmeting...",
                   len(dropped), RECOVERY_WAIT)
         time.sleep(RECOVERY_WAIT)
-        log.info("6. eindmeting (herstel-bevestiging van de weggevallen deelnemers)...")
-        recovered = fping_sweep(sorted(dropped), canary, family)
+        log.info("6. eindmeting (TTL=1, herstel-bevestiging van de weggevallen deelnemers)...")
+        recovered = ping_sweep(sorted(dropped), canary, family)
     else:
         log.info("niemand viel weg tijdens RTBH - geen eindmeting nodig.")
 
@@ -311,7 +344,7 @@ def cmd_survey(args: argparse.Namespace) -> None:
 
     notify_changes(args.fabric, changes_by_family, log)
 
-    log.info("Klaar. 'generate.py generate' + 'activate.py' opnieuw draaien om dit door te voeren in bgpd.conf.")
+    log.info("Klaar. Puur informatief - beïnvloedt bgpd.conf niet (geen selectieve export meer op basis van deze data).")
 
 
 def main() -> None:
