@@ -28,7 +28,17 @@ import urllib.parse
 import jinja2
 
 from lib.cli import run_main, setup_logging
-from lib.config import AS_SETS_FILE, NETBOX_BASE, OUTPUT_DIR, PEERS_DIR, RELATIONSHIP_IDS, RTBH_SURVEYS_DIR, TEMPLATES_DIR
+from lib.config import (
+    AS_SETS_FILE,
+    CANARY_V4,
+    CANARY_V6,
+    NETBOX_BASE,
+    OUTPUT_DIR,
+    PEERS_DIR,
+    RELATIONSHIP_IDS,
+    RTBH_SURVEYS_DIR,
+    TEMPLATES_DIR,
+)
 from lib.errors import BgpdGenError
 from lib.netbox import load_token, netbox_get
 from lib.router import device_id_from_router, get_router, get_scope
@@ -331,6 +341,8 @@ def build_context(token: str) -> tuple[dict, list[str]]:
         "peering_lan_prefixes": _peering_lan_prefixes(token),
         "transit_networks": _transit_networks(token),
         "rtbh_survey_by_fabric": _rtbh_survey_by_fabric(token),
+        "canary_v4": CANARY_V4,
+        "canary_v6": CANARY_V6,
         "groups": [g.lower().replace(" ", "-") for g in groups],
         "local_asn": router["asn"]["asn"],
         "router_id_ip": primary_ip4.split("/")[0],
