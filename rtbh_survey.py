@@ -86,8 +86,8 @@ from lib.router import get_scope
 from lib.sessions import build_sessions
 
 RTBH_COMMUNITY = "65535:666"
-RTBH_WAIT = 30  # seconden na het adverteren van de canary, vóór de daadwerkelijke test - ruimer dan verify_protection.py's 5s: hier gaat het via een route-server naar veel deelnemers tegelijk, niet één bilaterale sessie.
-RECOVERY_WAIT = 30  # seconden na het intrekken van de canary, vóór de eindmeting (herstel-bevestiging)
+RTBH_WAIT = 300  # seconden na het adverteren van de canary, vóór de daadwerkelijke test - flink opgehoogd (was 30s) omdat de resultaten tussen runs te veel fluctueerden; 5 minuten geeft BGP-propagatie én de deelnemers zelf ruim de tijd om de route daadwerkelijk te verwerken vóór er gemeten wordt.
+RECOVERY_WAIT = 300  # seconden na het intrekken van de canary, vóór de eindmeting (herstel-bevestiging) - zelfde overweging, ook de withdraw moet overal aantoonbaar verwerkt zijn.
 
 PING_COUNT = 2  # pogingen per host, tegen incidentele ICMP-ruis
 PING_TIMEOUT = 1  # seconden wachten op antwoord per poging (ping -W)
