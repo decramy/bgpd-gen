@@ -27,10 +27,16 @@ configuratie.
 
 Mechanisme, zelfde principe als verify_protection.py maar in bulk en via
 de route-server i.p.v. bilateraal: één gedeelde canary-announcement (niet
-per deelnemer te scopen, dus ook geen reden om 'm dat wel te doen), een
-fping-sweep van alle deelnemers vóór en ná activatie, en een herhaalde
-verificatie (meer retries) van alleen de deelnemers die "omvielen" om
-transiënte ICMP-ruis uit te sluiten voor een verdict definitief wordt.
+per deelnemer te scopen, dus ook geen reden om 'm dat wel te doen).
+Vijf fasen: (1) nulmeting - fping-sweep van alle deelnemers, (2) canary
+met RTBH-community adverteren, (3) RTBH_WAIT wachten, (4) daadwerkelijke
+test - alleen de deelnemers die bij de nulmeting reageerden opnieuw
+pingen, (5) canary weer intrekken. Wie tijdens fase 4 wegviel, wordt na
+RECOVERY_WAIT nogmaals gepingd (eindmeting): pas als die ook weer
+reageert - dus aantoonbaar wegviel ZOLANG de blackhole actief was en
+terugkwam ZODRA 'm ingetrokken werd - telt het als OK. Wegvallen zonder
+aantoonbaar herstel wordt SKIP (kan een toevallige, ongerelateerde storing
+zijn geweest, geen bevestigd RTBH-gedrag) i.p.v. voorbarig als OK geteld.
 
 Raakt nooit bgpd.conf of NetBox (schrijfrechten) - dat doet de normale
 generate.py-pijplijn, die het resultaatbestand gewoon als input leest
@@ -62,8 +68,9 @@ from lib.router import get_scope
 from lib.sessions import build_sessions
 
 RTBH_COMMUNITY = "65535:666"
-PROPAGATION_WAIT = 15  # seconden - ruimer dan verify_protection.py's 5s: hier gaat het via een route-server naar veel deelnemers tegelijk, niet één bilaterale sessie.
-FPING_RETRIES = 2  # extra pogingen bovenop de eerste (fping's -r), voor zowel de baseline- als de herbevestigingsronde
+RTBH_WAIT = 30  # seconden na het adverteren van de canary, vóór de daadwerkelijke test - ruimer dan verify_protection.py's 5s: hier gaat het via een route-server naar veel deelnemers tegelijk, niet één bilaterale sessie.
+RECOVERY_WAIT = 30  # seconden na het intrekken van de canary, vóór de eindmeting (herstel-bevestiging)
+FPING_RETRIES = 2  # extra pogingen bovenop de eerste (fping's -r), binnen elke afzonderlijke sweep
 
 
 def fabric_slug(name: str) -> str:
@@ -213,42 +220,43 @@ def survey_one_family(token: str, fabric: str, family: int, log) -> dict[int, st
     ip_to_asn = {ip: asn for asn, ip in participants.items()}
     all_ips = sorted(ip_to_asn)
 
-    log.info("baseline-sweep (vóór RTBH)...")
+    log.info("1. nulmeting (vóór RTBH)...")
     baseline = fping_sweep(all_ips, canary, family)
-    log.info("baseline: %d/%d deelnemers reageren", len(baseline), len(all_ips))
+    log.info("nulmeting: %d/%d deelnemers reageren", len(baseline), len(all_ips))
 
     canary_pfx = f"{canary}/{32 if family == 4 else 128}"
-    log.info("RTBH-community actief zetten op %s...", canary_pfx)
+    log.info("2. RTBH-community actief zetten op %s...", canary_pfx)
     bgpctl("network", "add", canary_pfx, "community", RTBH_COMMUNITY)
     try:
-        log.info("%ds propagatietijd...", PROPAGATION_WAIT)
-        time.sleep(PROPAGATION_WAIT)
-        after = fping_sweep(sorted(baseline), canary, family)
+        log.info("3. %ds wachten...", RTBH_WAIT)
+        time.sleep(RTBH_WAIT)
+        log.info("4. daadwerkelijke test (alleen nulmeting-responders)...")
+        during = fping_sweep(sorted(baseline), canary, family)
     finally:
+        log.info("5. RTBH-community weer intrekken...")
         bgpctl("network", "delete", canary_pfx)
-        log.info("RTBH-community weer verwijderd.")
 
-    diff = baseline - after
-    log.info("%d deelnemers stopten met reageren - herbevestigen...", len(diff))
-
-    honored: set[str] = set()
-    if diff:
-        bgpctl("network", "add", canary_pfx, "community", RTBH_COMMUNITY)
-        try:
-            time.sleep(PROPAGATION_WAIT)
-            after_confirm = fping_sweep(sorted(diff), canary, family)
-        finally:
-            bgpctl("network", "delete", canary_pfx)
-        honored = diff - after_confirm
+    dropped = baseline - during
+    recovered: set[str] = set()
+    if dropped:
+        log.info("%d deelnemer(s) stopten met reageren tijdens RTBH - %ds wachten vóór eindmeting...",
+                  len(dropped), RECOVERY_WAIT)
+        time.sleep(RECOVERY_WAIT)
+        log.info("6. eindmeting (herstel-bevestiging van de weggevallen deelnemers)...")
+        recovered = fping_sweep(sorted(dropped), canary, family)
+    else:
+        log.info("niemand viel weg tijdens RTBH - geen eindmeting nodig.")
 
     results: dict[int, str] = {}
     for ip, asn in ip_to_asn.items():
         if ip not in baseline:
-            results[asn] = "SKIP"
-        elif ip in honored:
-            results[asn] = "OK"
+            results[asn] = "SKIP"  # nooit bereikbaar op de nulmeting - niet te testen
+        elif ip not in dropped:
+            results[asn] = "FAIL"  # bleef reageren tijdens RTBH - niet gehonoreerd
+        elif ip in recovered:
+            results[asn] = "OK"  # viel weg tijdens RTBH, kwam terug ná intrekken - bevestigd
         else:
-            results[asn] = "FAIL"
+            results[asn] = "SKIP"  # viel weg, maar geen bevestigd herstel - mogelijk ongerelateerde storing
 
     ok = sum(1 for v in results.values() if v == "OK")
     fail = sum(1 for v in results.values() if v == "FAIL")
