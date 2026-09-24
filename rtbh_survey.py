@@ -72,14 +72,17 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import re
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 from lib.bgpctl import bgpctl, bgpctl_json
 from lib.cli import run_main, setup_logging
-from lib.config import CANARY_V4, CANARY_V6, NOTIFY_EMAIL, RTBH_SURVEYS_DIR
+from lib.config import CANARY_V4, CANARY_V6, NOTIFY_EMAIL, PEERINGDB_BASE, RTBH_SURVEYS_DIR
 from lib.errors import BgpdGenError
 from lib.mail import send_mail
 from lib.netbox import load_token
@@ -247,6 +250,25 @@ def diff_verdicts(old: dict[int, str], new: dict[int, str]) -> list[tuple[int, s
     return changed
 
 
+def fetch_asn_names(asns: set[int], log) -> dict[int, str]:
+    """{asn: netwerknaam} via één gebatchte PeeringDB-opvraging (net?asn__in=...)
+    - hooguit één keer per uurlijkse run, dus geen rate-limit-risico zoals bij
+    losse per-ASN-requests. Mist een ASN in de respons (niet in PeeringDB, of
+    de hele opvraging faalt) -> die valt in de mail gewoon terug op kaal
+    "AS<nummer>", geen harde fout."""
+    if not asns:
+        return {}
+    ids = ",".join(str(a) for a in sorted(asns))
+    url = f"{PEERINGDB_BASE}/net?asn__in={ids}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = json.loads(resp.read())["data"]
+        return {row["asn"]: row["name"] for row in data if row.get("name")}
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
+        log.warning("PeeringDB-naamopvraging voor de mail mislukt (%s) - namen blijven kaal.", e)
+        return {}
+
+
 def notify_changes(fabric: str, changes_by_family: dict[int, list[tuple[int, str, str]]], log) -> None:
     total = sum(len(c) for c in changes_by_family.values())
     if not total:
@@ -254,6 +276,8 @@ def notify_changes(fabric: str, changes_by_family: dict[int, list[tuple[int, str
     if not NOTIFY_EMAIL:
         log.warning("%d ASN(s) van RTBH-gedrag gewisseld, maar NOTIFY_EMAIL staat niet in config.py - geen mail verstuurd.", total)
         return
+    all_asns = {asn for changes in changes_by_family.values() for asn, _, _ in changes}
+    names = fetch_asn_names(all_asns, log)
     subject = f"RTBH-survey {fabric}: {total} peer(s) van gedrag gewisseld"
     lines = [f"RTBH-survey van {fabric} vond {total} gewijzigd(e) verdict(en) t.o.v. de vorige run:", ""]
     for family in sorted(changes_by_family):
@@ -262,7 +286,8 @@ def notify_changes(fabric: str, changes_by_family: dict[int, list[tuple[int, str
             continue
         lines.append(f"IPv{family}:")
         for asn, old_v, new_v in changes:
-            lines.append(f"  AS{asn}: {old_v} -> {new_v}")
+            label = f"AS{asn} ({names[asn]})" if asn in names else f"AS{asn}"
+            lines.append(f"  {label}: {old_v} -> {new_v}")
         lines.append("")
     lines.append("(automatisch gegenereerd door rtbh_survey.py)")
     try:
