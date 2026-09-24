@@ -4,10 +4,12 @@ route-server(s) van die fabric) op RTBH-gedrag, en schrijft het resultaat
 weg als platte tekst naar rtbh-surveys/<fabric-slug>-v<4|6>.txt
 (RTBH_SURVEYS_DIR, lib/config.py) - één regel per ooit geziene
 deelnemer-ASN, met verdict OK (RTBH aantoonbaar gehonoreerd), FAIL (niet
-gehonoreerd) of SKIP (nooit positief bevestigd, want al onbereikbaar op de
-baseline). Bewust geen NetBox-object hiervoor (in tegenstelling tot de
-transit-AS-lijst) - dit is een tussentijds testresultaat, geen beheerde
-configuratie-invoer.
+gehonoreerd), SKIP (nooit positief bevestigd, want al onbereikbaar op de
+baseline) of INCONSISTENT (deelnemer heeft meerdere interconnects op deze
+fabric - zie enumerate_participants - die het onderling oneens zijn, bv.
+één poort blackholet wel, de andere niet). Bewust geen NetBox-object
+hiervoor (in tegenstelling tot de transit-AS-lijst) - dit is een
+tussentijds testresultaat, geen beheerde configuratie-invoer.
 
 Draait standaard beide address families (v4 én v6 zijn onafhankelijke
 testen - RTBH-gedrag over v4 zegt niets gegarandeerd over v6, dus ook
@@ -117,12 +119,21 @@ def find_route_server_ips(token: str, fabric: str, family: int) -> list[str]:
     })
 
 
-def enumerate_participants(rs_ips: list[str]) -> dict[int, str]:
-    """{deelnemer-ASN: hun peering-LAN-IP (true_nexthop)}, verzameld over
-    alle opgegeven route-server-sessies van de fabric (bv. rs1+rs2) - een
-    deelnemer die niet op elke RS zit, wordt toch meegenomen zodra hij op
-    minstens één van de twee voorkomt."""
-    result: dict[int, str] = {}
+def enumerate_participants(rs_ips: list[str]) -> dict[int, set[str]]:
+    """{deelnemer-ASN: set van al hun peering-LAN-IP's (true_nexthop)},
+    verzameld over alle opgegeven route-server-sessies van de fabric (bv.
+    rs1+rs2) - een deelnemer die niet op elke RS zit, wordt toch meegenomen
+    zodra hij op minstens één van de twee voorkomt.
+
+    Een ASN kan hier met MEERDERE IP's terugkomen: PeeringDB laat zien dat
+    op Frys-IX minstens 15 ASN's meerdere interconnects hebben (redundante/
+    multi-poort-aansluitingen, zoals AS8283/ColoClue of AS15169/Google) -
+    eerder werd hier stilzwijgend met setdefault() maar één IP van
+    bewaard, willekeurig afhankelijk van RIB-volgorde. Nu worden ze allemaal
+    apart getest (zie survey_one_family) zodat een deelnemer waarvan de
+    poorten het onderling oneens zijn zichtbaar INCONSISTENT wordt i.p.v.
+    stil op een van de twee te gokken."""
+    result: dict[int, set[str]] = {}
     for rs_ip in rs_ips:
         data = bgpctl_json("show", "rib", "neighbor", rs_ip)
         for entry in data.get("rib", []):
@@ -130,7 +141,7 @@ def enumerate_participants(rs_ips: list[str]) -> dict[int, str]:
             if not aspath:
                 continue
             asn = int(aspath.split()[0])
-            result.setdefault(asn, entry["true_nexthop"])
+            result.setdefault(asn, set()).add(entry["true_nexthop"])
     return result
 
 
@@ -176,21 +187,22 @@ def change_history_path(fabric: str):
 def log_change_history(
     fabric: str,
     changes_by_family: dict[int, list[tuple[int, str, str]]],
-    asn_to_ip_by_family: dict[int, dict[int, str]],
+    asn_to_ips_by_family: dict[int, dict[int, set[str]]],
 ) -> None:
     """Append-only log van elke individuele verdict-wijziging, inclusief de
-    gepingte peering-LAN-IP (los van de e-mailnotificatie, die niemand
+    gepingte peering-LAN-IP('s) (los van de e-mailnotificatie, die niemand
     achteraf kan doorzoeken) - nodig om te kunnen analyseren of steeds
     dezelfde ASN's/IP's wisselen (ruis/instabiele verbinding) of dat het
-    random verspreid is (bv. echte gedragswijziging). Nooit afgekapt/
-    geroteerd door dit script zelf - dat is bewust een latere beslissing
-    zodra duidelijk is hoe snel dit bestand groeit."""
+    random verspreid is (bv. echte gedragswijziging). Meerdere IP's voor
+    één ASN (redundante interconnects) worden met '+' samengevoegd in één
+    kolom. Nooit afgekapt/geroteerd door dit script zelf - dat is bewust
+    een latere beslissing zodra duidelijk is hoe snel dit bestand groeit."""
     lines = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for family, changes in sorted(changes_by_family.items()):
-        asn_to_ip = asn_to_ip_by_family.get(family, {})
+        asn_to_ips = asn_to_ips_by_family.get(family, {})
         for asn, old_v, new_v in changes:
-            ip = asn_to_ip.get(asn, "?")
+            ip = "+".join(sorted(asn_to_ips.get(asn, {"?"})))
             lines.append(f"{now} v{family} {asn} {ip} {old_v}->{new_v}")
     if not lines:
         return
@@ -213,7 +225,7 @@ def write_survey_results(fabric: str, family: int, results: dict[int, str], log)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
     lines = [
         f"# rtbh-survey: {fabric} (route-server, IPv{family}), gegenereerd {now} door rtbh_survey.py",
-        "# format: <asn> <OK|FAIL|SKIP>",
+        "# format: <asn> <OK|FAIL|SKIP|INCONSISTENT>",
     ]
     lines += [f"{asn} {verdict}" for asn, verdict in sorted(results.items())]
     path.write_text("\n".join(lines) + "\n")
@@ -297,13 +309,13 @@ def notify_changes(fabric: str, changes_by_family: dict[int, list[tuple[int, str
         log.error("mail versturen mislukt: %s", e)
 
 
-def survey_one_family(token: str, fabric: str, family: int, log) -> tuple[dict[int, str], dict[int, str]]:
+def survey_one_family(token: str, fabric: str, family: int, log) -> tuple[dict[int, str], dict[int, set[str]]]:
     """Draait de volledige sweep voor één address family en geeft
-    (results, asn_to_ip) terug - results is {asn: 'OK'|'FAIL'|'SKIP'},
-    asn_to_ip is de bijbehorende peering-LAN-IP per ASN (voor de
-    change-history-log). Schrijft zelf nog niets weg, dat doet de
-    aanroeper (zodat cmd_survey eerst v4+v6 kan vergelijken vóór beide
-    bestanden geschreven worden)."""
+    (results, asn_to_ips) terug - results is {asn: 'OK'|'FAIL'|'SKIP'|
+    'INCONSISTENT'}, asn_to_ips is de bijbehorende set peering-LAN-IP('s)
+    per ASN (voor de change-history-log). Schrijft zelf nog niets weg, dat
+    doet de aanroeper (zodat cmd_survey eerst v4+v6 kan vergelijken vóór
+    beide bestanden geschreven worden)."""
     canary = CANARY_V4 if family == 4 else CANARY_V6
     if not canary:
         raise BgpdGenError(f"CANARY_V{family} staat niet ingevuld in config.py")
@@ -317,9 +329,11 @@ def survey_one_family(token: str, fabric: str, family: int, log) -> tuple[dict[i
     log.info("route-server(s) voor '%s' (IPv%d): %s", fabric, family, ", ".join(rs_ips))
 
     participants = enumerate_participants(rs_ips)
-    log.info("%d deelnemers gevonden (aggregatie over %d route-server-sessie(s))",
-              len(participants), len(rs_ips))
-    ip_to_asn = {ip: asn for asn, ip in participants.items()}
+    multi = {asn: ips for asn, ips in participants.items() if len(ips) > 1}
+    log.info("%d deelnemers gevonden (%d IP('s) totaal, %d deelnemer(s) met meerdere interconnects, "
+              "aggregatie over %d route-server-sessie(s))",
+              len(participants), sum(len(ips) for ips in participants.values()), len(multi), len(rs_ips))
+    ip_to_asn = {ip: asn for asn, ips in participants.items() for ip in ips}
     all_ips = sorted(ip_to_asn)
 
     log.info("1. nulmeting (TTL=1, vóór RTBH)...")
@@ -349,22 +363,45 @@ def survey_one_family(token: str, fabric: str, family: int, log) -> tuple[dict[i
     else:
         log.info("niemand viel weg tijdens RTBH - geen eindmeting nodig.")
 
-    results: dict[int, str] = {}
-    for ip, asn in ip_to_asn.items():
+    ip_verdict: dict[str, str] = {}
+    for ip in all_ips:
         if ip not in baseline:
-            results[asn] = "SKIP"  # nooit bereikbaar op de nulmeting - niet te testen
+            ip_verdict[ip] = "SKIP"  # nooit bereikbaar op de nulmeting - niet te testen
         elif ip not in dropped:
-            results[asn] = "FAIL"  # bleef reageren tijdens RTBH - niet gehonoreerd
+            ip_verdict[ip] = "FAIL"  # bleef reageren tijdens RTBH - niet gehonoreerd
         elif ip in recovered:
-            results[asn] = "OK"  # viel weg tijdens RTBH, kwam terug ná intrekken - bevestigd
+            ip_verdict[ip] = "OK"  # viel weg tijdens RTBH, kwam terug ná intrekken - bevestigd
         else:
-            results[asn] = "SKIP"  # viel weg, maar geen bevestigd herstel - mogelijk ongerelateerde storing
+            ip_verdict[ip] = "SKIP"  # viel weg, maar geen bevestigd herstel - mogelijk ongerelateerde storing
+
+    # Per ASN aggregeren over al zijn interconnects. SKIP van een IP weegt
+    # niet mee in de vergelijking (die zegt niets over RTBH-gedrag, alleen
+    # dat díe ene poort niet te testen was) - pas als de overgebleven,
+    # daadwerkelijk geteste poorten het oneens zijn (zowel OK als FAIL
+    # ergens gezien), wordt het INCONSISTENT.
+    results: dict[int, str] = {}
+    for asn, ips in participants.items():
+        verdicts = {ip_verdict[ip] for ip in ips}
+        real = verdicts - {"SKIP"}
+        if not real:
+            results[asn] = "SKIP"
+        elif len(real) == 1:
+            results[asn] = real.pop()
+        else:
+            results[asn] = "INCONSISTENT"
 
     ok = sum(1 for v in results.values() if v == "OK")
     fail = sum(1 for v in results.values() if v == "FAIL")
     skip = sum(1 for v in results.values() if v == "SKIP")
-    log.info("IPv%d-resultaat: %d OK, %d FAIL, %d SKIP (van %d)", family, ok, fail, skip, len(results))
-    return results, {asn: ip for ip, asn in ip_to_asn.items()}
+    inconsistent = sum(1 for v in results.values() if v == "INCONSISTENT")
+    log.info("IPv%d-resultaat: %d OK, %d FAIL, %d SKIP, %d INCONSISTENT (van %d)",
+              family, ok, fail, skip, inconsistent, len(results))
+    if inconsistent:
+        for asn, v in results.items():
+            if v == "INCONSISTENT":
+                per_ip = ", ".join(f"{ip}={ip_verdict[ip]}" for ip in sorted(participants[asn]))
+                log.warning("  AS%d inconsistent tussen interconnects: %s", asn, per_ip)
+    return results, participants
 
 
 def warn_on_family_mismatch(fabric: str, results_by_family: dict[int, dict[int, str]], log) -> None:
@@ -395,9 +432,9 @@ def cmd_survey(args: argparse.Namespace) -> None:
     families = [args.family] if args.family else [4, 6]
 
     results_by_family: dict[int, dict[int, str]] = {}
-    asn_to_ip_by_family: dict[int, dict[int, str]] = {}
+    asn_to_ips_by_family: dict[int, dict[int, set[str]]] = {}
     for family in families:
-        results_by_family[family], asn_to_ip_by_family[family] = survey_one_family(token, args.fabric, family, log)
+        results_by_family[family], asn_to_ips_by_family[family] = survey_one_family(token, args.fabric, family, log)
 
     if len(results_by_family) > 1:
         warn_on_family_mismatch(args.fabric, results_by_family, log)
@@ -412,7 +449,7 @@ def cmd_survey(args: argparse.Namespace) -> None:
     for family, results in results_by_family.items():
         write_survey_results(args.fabric, family, results, log)
 
-    log_change_history(args.fabric, changes_by_family, asn_to_ip_by_family)
+    log_change_history(args.fabric, changes_by_family, asn_to_ips_by_family)
     notify_changes(args.fabric, changes_by_family, log)
 
     log.info("Klaar. Puur informatief - beïnvloedt bgpd.conf niet (geen selectieve export meer op basis van deze data).")
