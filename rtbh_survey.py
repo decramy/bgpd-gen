@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -89,10 +90,12 @@ RTBH_COMMUNITY = "65535:666"
 RTBH_WAIT = 300  # seconden na het adverteren van de canary, vóór de daadwerkelijke test - flink opgehoogd (was 30s) omdat de resultaten tussen runs te veel fluctueerden; 5 minuten geeft BGP-propagatie én de deelnemers zelf ruim de tijd om de route daadwerkelijk te verwerken vóór er gemeten wordt.
 RECOVERY_WAIT = 300  # seconden na het intrekken van de canary, vóór de eindmeting (herstel-bevestiging) - zelfde overweging, ook de withdraw moet overal aantoonbaar verwerkt zijn.
 
-PING_COUNT = 2  # pogingen per host, tegen incidentele ICMP-ruis
+PING_COUNT = 10  # pogingen per host - was 2, te dunne marge: een deelnemer met een marginaal/verlieslijdend pad kon zo willekeurig net wel of niet als 'bereikbaar' gelden, los van RTBH-gedrag
+PING_MIN_RECEIVED = 9  # van de PING_COUNT pogingen moeten er minimaal dit aantal aankomen (dus max. 1 verloren pakket getolereerd) om als 'bereikbaar' te tellen
 PING_TIMEOUT = 1  # seconden wachten op antwoord per poging (ping -W)
 PING_TTL = 1  # buggy zit zelf op de IXP-peering-LAN - een daadwerkelijke buur is altijd 1 hop weg
 PING_WORKERS = 50  # losse ping's per host i.p.v. één fping-sweep (die kan de uitgaande TTL niet zetten) - parallel om de doorlooptijd beperkt te houden
+PING_LOSS_RE = re.compile(r"(\d+) packets transmitted, (\d+) received")
 
 
 def fabric_slug(name: str) -> str:
@@ -129,13 +132,22 @@ def enumerate_participants(rs_ips: list[str]) -> dict[int, str]:
 
 
 def _ping_one(ip: str, canary: str, family: int) -> bool:
+    """Bereikbaar = minstens PING_MIN_RECEIVED van de PING_COUNT pogingen
+    kwamen aan - dus niet zomaar 'returncode 0' (dat is bij ping al waar bij
+    één enkel antwoord), maar een expliciete telling uit de samenvattingsregel
+    ("X packets transmitted, Y received"), zodat één toevallig verloren
+    pakket niet meteen als 'onbereikbaar' geldt én andersom, één toevallig
+    doorgekomen pakket niet meteen als 'bereikbaar'."""
     cmd = [
         "ping", "-4" if family == 4 else "-6",
         "-c", str(PING_COUNT), "-W", str(PING_TIMEOUT), "-t", str(PING_TTL),
         "-I", canary, ip,
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
-    return r.returncode == 0
+    m = PING_LOSS_RE.search(r.stdout)
+    if not m:
+        return False
+    return int(m.group(2)) >= PING_MIN_RECEIVED
 
 
 def ping_sweep(ips: list[str], canary: str, family: int) -> set[str]:
@@ -158,18 +170,25 @@ def change_history_path(fabric: str):
     return RTBH_SURVEYS_DIR / f"{fabric_slug(fabric)}-changes.log"
 
 
-def log_change_history(fabric: str, changes_by_family: dict[int, list[tuple[int, str, str]]]) -> None:
-    """Append-only log van elke individuele verdict-wijziging (los van de
-    e-mailnotificatie, die niemand achteraf kan doorzoeken) - nodig om te
-    kunnen analyseren of steeds dezelfde ASN's wisselen (ruis/instabiele
-    verbinding) of dat het random verspreid is (bv. echte gedragswijziging).
-    Nooit afgekapt/geroteerd door dit script zelf - dat is bewust een latere
-    beslissing zodra duidelijk is hoe snel dit bestand groeit."""
+def log_change_history(
+    fabric: str,
+    changes_by_family: dict[int, list[tuple[int, str, str]]],
+    asn_to_ip_by_family: dict[int, dict[int, str]],
+) -> None:
+    """Append-only log van elke individuele verdict-wijziging, inclusief de
+    gepingte peering-LAN-IP (los van de e-mailnotificatie, die niemand
+    achteraf kan doorzoeken) - nodig om te kunnen analyseren of steeds
+    dezelfde ASN's/IP's wisselen (ruis/instabiele verbinding) of dat het
+    random verspreid is (bv. echte gedragswijziging). Nooit afgekapt/
+    geroteerd door dit script zelf - dat is bewust een latere beslissing
+    zodra duidelijk is hoe snel dit bestand groeit."""
     lines = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for family, changes in sorted(changes_by_family.items()):
+        asn_to_ip = asn_to_ip_by_family.get(family, {})
         for asn, old_v, new_v in changes:
-            lines.append(f"{now} v{family} {asn} {old_v}->{new_v}")
+            ip = asn_to_ip.get(asn, "?")
+            lines.append(f"{now} v{family} {asn} {ip} {old_v}->{new_v}")
     if not lines:
         return
     path = change_history_path(fabric)
@@ -253,11 +272,13 @@ def notify_changes(fabric: str, changes_by_family: dict[int, list[tuple[int, str
         log.error("mail versturen mislukt: %s", e)
 
 
-def survey_one_family(token: str, fabric: str, family: int, log) -> dict[int, str]:
+def survey_one_family(token: str, fabric: str, family: int, log) -> tuple[dict[int, str], dict[int, str]]:
     """Draait de volledige sweep voor één address family en geeft
-    {asn: 'OK'|'FAIL'|'SKIP'} terug - schrijft zelf nog niets weg, dat
-    doet de aanroeper (zodat cmd_survey eerst v4+v6 kan vergelijken vóór
-    beide bestanden geschreven worden)."""
+    (results, asn_to_ip) terug - results is {asn: 'OK'|'FAIL'|'SKIP'},
+    asn_to_ip is de bijbehorende peering-LAN-IP per ASN (voor de
+    change-history-log). Schrijft zelf nog niets weg, dat doet de
+    aanroeper (zodat cmd_survey eerst v4+v6 kan vergelijken vóór beide
+    bestanden geschreven worden)."""
     canary = CANARY_V4 if family == 4 else CANARY_V6
     if not canary:
         raise BgpdGenError(f"CANARY_V{family} staat niet ingevuld in config.py")
@@ -318,7 +339,7 @@ def survey_one_family(token: str, fabric: str, family: int, log) -> dict[int, st
     fail = sum(1 for v in results.values() if v == "FAIL")
     skip = sum(1 for v in results.values() if v == "SKIP")
     log.info("IPv%d-resultaat: %d OK, %d FAIL, %d SKIP (van %d)", family, ok, fail, skip, len(results))
-    return results
+    return results, {asn: ip for ip, asn in ip_to_asn.items()}
 
 
 def warn_on_family_mismatch(fabric: str, results_by_family: dict[int, dict[int, str]], log) -> None:
@@ -349,8 +370,9 @@ def cmd_survey(args: argparse.Namespace) -> None:
     families = [args.family] if args.family else [4, 6]
 
     results_by_family: dict[int, dict[int, str]] = {}
+    asn_to_ip_by_family: dict[int, dict[int, str]] = {}
     for family in families:
-        results_by_family[family] = survey_one_family(token, args.fabric, family, log)
+        results_by_family[family], asn_to_ip_by_family[family] = survey_one_family(token, args.fabric, family, log)
 
     if len(results_by_family) > 1:
         warn_on_family_mismatch(args.fabric, results_by_family, log)
@@ -365,7 +387,7 @@ def cmd_survey(args: argparse.Namespace) -> None:
     for family, results in results_by_family.items():
         write_survey_results(args.fabric, family, results, log)
 
-    log_change_history(args.fabric, changes_by_family)
+    log_change_history(args.fabric, changes_by_family, asn_to_ip_by_family)
     notify_changes(args.fabric, changes_by_family, log)
 
     log.info("Klaar. Puur informatief - beïnvloedt bgpd.conf niet (geen selectieve export meer op basis van deze data).")
