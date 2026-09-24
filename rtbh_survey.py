@@ -154,6 +154,29 @@ def survey_file_path(fabric: str, family: int):
     return RTBH_SURVEYS_DIR / f"{fabric_slug(fabric)}-v{family}.txt"
 
 
+def change_history_path(fabric: str):
+    return RTBH_SURVEYS_DIR / f"{fabric_slug(fabric)}-changes.log"
+
+
+def log_change_history(fabric: str, changes_by_family: dict[int, list[tuple[int, str, str]]]) -> None:
+    """Append-only log van elke individuele verdict-wijziging (los van de
+    e-mailnotificatie, die niemand achteraf kan doorzoeken) - nodig om te
+    kunnen analyseren of steeds dezelfde ASN's wisselen (ruis/instabiele
+    verbinding) of dat het random verspreid is (bv. echte gedragswijziging).
+    Nooit afgekapt/geroteerd door dit script zelf - dat is bewust een latere
+    beslissing zodra duidelijk is hoe snel dit bestand groeit."""
+    lines = []
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for family, changes in sorted(changes_by_family.items()):
+        for asn, old_v, new_v in changes:
+            lines.append(f"{now} v{family} {asn} {old_v}->{new_v}")
+    if not lines:
+        return
+    path = change_history_path(fabric)
+    with path.open("a") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def write_survey_results(fabric: str, family: int, results: dict[int, str], log) -> None:
     """results: {asn: 'OK'|'FAIL'|'SKIP'}. Schrijft naar
     rtbh-surveys/<fabric-slug>-v<family>.txt, één regel '<asn> <verdict>'
@@ -342,6 +365,7 @@ def cmd_survey(args: argparse.Namespace) -> None:
     for family, results in results_by_family.items():
         write_survey_results(args.fabric, family, results, log)
 
+    log_change_history(args.fabric, changes_by_family)
     notify_changes(args.fabric, changes_by_family, log)
 
     log.info("Klaar. Puur informatief - beïnvloedt bgpd.conf niet (geen selectieve export meer op basis van deze data).")
